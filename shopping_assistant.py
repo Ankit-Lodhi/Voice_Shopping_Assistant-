@@ -7,6 +7,26 @@ import streamlit as st
 import speech_recognition as sr
 from audio_recorder_streamlit import audio_recorder
 
+st.title("🎤 Test Audio Recording")
+
+# Widget
+audio_bytes = audio_recorder()
+
+if audio_bytes:
+    st.audio(audio_bytes, format="audio/wav")  # playback
+    st.success("Audio recorded!")
+
+    # Convert to text
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
+        audio = recognizer.record(source)
+        try:
+            text = recognizer.recognize_google(audio, language="en-US")
+            st.write("👉 Recognized:", text)
+        except Exception as e:
+            st.error(f"Could not recognize: {e}")
+
+
 # -------------------------
 # OPTIONAL NLP (spaCy) - fallback to regex if not available
 # -------------------------
