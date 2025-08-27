@@ -1,162 +1,198 @@
-import speech_recognition as sr
-import pyttsx3
-import spacy
+import io
 import json
 import re
-import streamlit as st
 from datetime import datetime
 
-# -------------------------
-# INITIAL SETUP
-# -------------------------
-recognizer = sr.Recognizer()
-speaker = pyttsx3.init()
-nlp = spacy.load("en_core_web_sm")   # NLP model
+import streamlit as st
+import speech_recognition as sr
+from audio_recorder_streamlit import audio_recorder
 
-# Shopping list & categories
-shopping_list = []
-categories = {
+# -------------------------
+# OPTIONAL NLP (spaCy) - fallback to regex if not available
+# -------------------------
+try:
+    import spacy
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except Exception:
+        nlp = spacy.blank("en")
+except Exception:
+    nlp = None
+
+# -------------------------
+# DATA
+# -------------------------
+CATEGORIES = {
     "milk": "dairy", "cheese": "dairy", "yogurt": "dairy",
     "apple": "fruits", "banana": "fruits", "orange": "fruits",
     "bread": "bakery", "rice": "grains", "water": "beverages"
 }
 
-# Load history for smart suggestions
-try:
-    with open("history.json", "r") as f:
-        history = json.load(f)
-except:
-    history = {"purchases": []}
+NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
+}
+
+MOCK_PRODUCTS = [
+    {"name": "organic apples", "brand": "Farm Fresh", "price": 3.5, "unit": "kg"},
+    {"name": "toothpaste", "brand": "Colgate", "price": 2.2, "unit": "tube"},
+    {"name": "toothpaste", "brand": "Sensodyne", "price": 4.8, "unit": "tube"},
+    {"name": "almond milk", "brand": "Alpro", "price": 3.9, "unit": "1L"},
+]
 
 # -------------------------
-# SPEECH & FEEDBACK
+# STATE
 # -------------------------
-def speak(text):
-    speaker.say(text)
-    speaker.runAndWait()
+def init_state():
+    if "shopping_list" not in st.session_state:
+        st.session_state.shopping_list = []
+    if "history" not in st.session_state:
+        st.session_state.history = {"purchases": []}
 
-def listen_command(language="en-US"):
-    """Listen to user voice and return text"""
-    with sr.Microphone() as source:
-        st.info("🎤 Listening... Speak now!")
-        audio = recognizer.listen(source)
-
-    try:
-        command = recognizer.recognize_google(audio, language=language)
-        st.success(f"👉 You said: {command}")
-        return command.lower()
-    except sr.UnknownValueError:
-        st.error("❌ Could not understand")
-        return ""
-    except sr.RequestError:
-        st.error("⚠️ Could not connect to speech service")
-        return ""
+def save_history():
+    with open("history.json", "w") as f:
+        json.dump(st.session_state.history, f)
 
 # -------------------------
 # NLP HELPERS
 # -------------------------
-def extract_item_and_qty(command):
-    """Extract item and quantity from a voice command"""
-    doc = nlp(command)
-    qty = 1
+def parse_quantity(text):
+    m = re.search(r"(\d+)", text)
+    if m:
+        return int(m.group(1))
+    for w, v in NUMBER_WORDS.items():
+        if w in text:
+            return v
+    return 1
+
+def parse_command(command):
+    c = command.lower()
+    qty = parse_quantity(c)
+
+    if "add" in c or "buy" in c or "need" in c:
+        intent = "add"
+    elif "remove" in c or "delete" in c:
+        intent = "remove"
+    elif "show" in c or "list" in c:
+        intent = "show"
+    elif "find" in c or "search" in c:
+        intent = "find"
+    elif "suggest" in c or "recommend" in c:
+        intent = "suggest"
+    else:
+        intent = "unknown"
+
+    # extract item
     item = None
-
-    # Quantity via regex
-    match = re.search(r'\d+', command)
-    if match:
-        qty = int(match.group())
-
-    # Find noun in sentence
-    for token in doc:
-        if token.pos_ == "NOUN":
-            item = token.text.lower()
+    for known in CATEGORIES.keys():
+        if known in c:
+            item = known
             break
+    if not item and nlp:
+        doc = nlp(c)
+        nouns = [t.text.lower() for t in doc if t.pos_ in ("NOUN", "PROPN")]
+        if nouns:
+            item = nouns[-1]
 
-    return item, qty
+    # extract price filter
+    price_filter = None
+    m = re.search(r"(under|below|less than)\s*\$?\s*([\d\.]+)", c)
+    if m:
+        price_filter = float(m.group(2))
+
+    return intent, item, qty, price_filter
 
 # -------------------------
-# SHOPPING LIST COMMANDS
+# COMMAND HANDLERS
 # -------------------------
-def process_command(command):
-    global shopping_list
+def add_item(item, qty):
+    cat = CATEGORIES.get(item, "others")
+    st.session_state.shopping_list.append({"item": item, "qty": qty, "category": cat})
+    st.session_state.history["purchases"].append({"item": item, "date": str(datetime.now().date())})
+    save_history()
+    st.success(f"✅ Added {qty} × {item} ({cat})")
 
-    if "add" in command or "buy" in command or "need" in command:
-        item, qty = extract_item_and_qty(command)
-        if item:
-            shopping_list.append({"item": item, "qty": qty, "category": categories.get(item, "others")})
-            history["purchases"].append({"item": item, "date": str(datetime.now().date())})
-            save_history()
-            speak(f"Added {qty} {item} to your list.")
-        else:
-            speak("I could not detect the item.")
-
-    elif "remove" in command or "delete" in command:
-        item, _ = extract_item_and_qty(command)
-        for i in shopping_list:
-            if i["item"] == item:
-                shopping_list.remove(i)
-                speak(f"Removed {item} from your list.")
-                return
-        speak(f"{item} is not in your list.")
-
-    elif "show" in command or "list" in command:
-        if shopping_list:
-            speak("Here is your shopping list.")
-        else:
-            speak("Your shopping list is empty.")
-
-    elif "find" in command or "search" in command:
-        # Mock product DB
-        if "apple" in command:
-            st.info("🍎 Found organic apples, $3.5/kg")
-            speak("I found organic apples for three point five dollars per kilo.")
-        else:
-            speak("I could not find that item right now.")
-
-    elif "suggest" in command:
-        suggest_items()
-
-    elif "stop" in command or "exit" in command:
-        speak("Goodbye! Happy shopping!")
-        return False
-
+def remove_item(item):
+    before = len(st.session_state.shopping_list)
+    st.session_state.shopping_list = [i for i in st.session_state.shopping_list if i["item"] != item]
+    if len(st.session_state.shopping_list) < before:
+        st.warning(f"❌ Removed {item}")
     else:
-        speak("Sorry, I didn't understand.")
-    return True
+        st.info(f"{item} not found in your list")
 
-# -------------------------
-# SMART SUGGESTIONS
-# -------------------------
+def show_list():
+    if not st.session_state.shopping_list:
+        st.info("🛒 Your list is empty.")
+        return
+    st.subheader("🛒 Shopping List")
+    for i in st.session_state.shopping_list:
+        st.write(f"- {i['qty']} × {i['item']} ({i['category']})")
+
 def suggest_items():
-    if history["purchases"]:
-        last_items = [p["item"] for p in history["purchases"][-3:]]
-        st.info(f"🛒 Based on your history, you may need: {', '.join(last_items)}")
-        speak("I suggest you might need " + ", ".join(last_items))
-    else:
-        speak("No shopping history available yet.")
+    history = st.session_state.history.get("purchases", [])
+    if not history:
+        st.info("No history yet.")
+        return
+    last = [p["item"] for p in history[-3:]]
+    st.info("💡 You may need: " + ", ".join(last))
 
-def save_history():
-    with open("history.json", "w") as f:
-        json.dump(history, f)
+def search_products(item, price_filter):
+    results = [p for p in MOCK_PRODUCTS if item in p["name"]]
+    if price_filter:
+        results = [p for p in results if p["price"] <= price_filter]
+    if results:
+        st.subheader("🔎 Results")
+        for p in results:
+            st.write(f"- {p['name']} ({p['brand']}) - ${p['price']} / {p['unit']}")
+    else:
+        st.info("No matches found.")
+
+def handle_command(cmd):
+    intent, item, qty, price_filter = parse_command(cmd)
+    if intent == "add" and item:
+        add_item(item, qty)
+    elif intent == "remove" and item:
+        remove_item(item)
+    elif intent == "show":
+        show_list()
+    elif intent == "suggest":
+        suggest_items()
+    elif intent == "find" and item:
+        search_products(item, price_filter)
+    else:
+        st.warning("⚠️ Could not understand your command.")
 
 # -------------------------
 # STREAMLIT UI
 # -------------------------
 def main():
+    init_state()
     st.title("🛍 Voice Command Shopping Assistant")
-    st.write("Speak commands like: 'Add milk', 'Remove apples', 'Show my list', 'Suggest items', 'Find apples under $5'")
 
-    if st.button("🎤 Start Voice Command"):
-        cmd = listen_command(language="en-US")  # you can change to 'hi-IN' for Hindi
+    st.write("Try commands like: **add milk**, **remove apples**, **show list**, **suggest items**, **find apples under 5**")
+
+    # Voice input
+    with st.expander("🎤 Record a command"):
+        audio = audio_recorder("Click to record / stop")
+        if audio:
+            recognizer = sr.Recognizer()
+            try:
+                with sr.AudioFile(io.BytesIO(audio)) as source:
+                    data = recognizer.record(source)
+                text = recognizer.recognize_google(data, language="en-US")
+                st.success(f"You said: {text}")
+                handle_command(text)
+            except:
+                st.error("❌ Could not recognize speech. Try typing instead.")
+
+    # Text input fallback
+    cmd = st.text_input("Or type a command:")
+    if st.button("Run"):
         if cmd:
-            process_command(cmd)
+            handle_command(cmd)
 
-    if shopping_list:
-        st.subheader("🛒 Current Shopping List")
-        for item in shopping_list:
-            st.write(f"- {item['qty']} × {item['item']} ({item['category']})")
-    else:
-        st.write("Shopping list is empty.")
+    st.divider()
+    show_list()
 
 if __name__ == "__main__":
     main()
