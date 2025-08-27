@@ -1,4 +1,4 @@
-speechrecognition
-pyttsx3
-spacy
 streamlit
+speechrecognition
+audio-recorder-streamlit
+spacy
